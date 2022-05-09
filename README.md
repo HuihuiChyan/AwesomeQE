@@ -3,9 +3,9 @@
 
 QE（Quality Estimation，翻译质量评估）旨在无参考译文的前提下对机器翻译的结果进行自动化评估。QE可以用于在笔译场景下对翻译结果进行初筛，控制后编辑成本，也可以用于对翻译输出进行风险预警和质量控制，在机器翻译的应用场景中具有很重要的价值。
 
-近年来，基于预训练模型的QE成为了主流方法，经过长时间大规模预训练得到的模型，对于数据稀缺的QE任务有很大提升作用。但是，现有的QE框架（比如[OpenKiwi](https://github.com/Unbabel/OpenKiwi) 和 [Transquest][https://github.com/TharinduDR/TransQuest] ）等，仅仅集成了mBERT, XLM-R等少数预训练模型，没有充分挖掘预训练模型的潜力。
+近年来，基于预训练模型的QE成为了主流方法，经过长时间大规模预训练得到的模型，对于数据稀缺的QE任务有很大提升作用。但是，现有的QE框架（比如[OpenKiwi](https://github.com/Unbabel/OpenKiwi) 和 [Transquest](https://github.com/TharinduDR/TransQuest) ）等，仅仅集成了mBERT, XLM-R等少数预训练模型，没有充分挖掘预训练模型的潜力。
 
-本仓库致力于集成尽可能多的预训练模型，包括encoder模型（BERT，XLM等）和encoder-decoder（BART，MarianMT）等。在离线场景下，使用本系统所提供的多个预训练模型的集成系统，不需要额外的数据增强或者架构工程，就可以达到顶尖的QE精度。
+本仓库致力于集成尽可能多的预训练模型，包括encoder模型（BERT，XLM等）和encoder-decoder模型（BART，MarianMT）等。在离线场景下，使用本系统所提供的多个预训练模型的集成系统，不需要额外的数据增强或者架构工程，就可以达到顶尖的QE精度。
 
 有任何问题欢迎随时提出issue，我会第一时间反馈修正（您也可以添加我的微信huanghui2020708）。
 
