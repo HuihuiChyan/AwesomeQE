@@ -126,6 +126,7 @@ def evaluate(args, model, tokenizer, valid_dataloader, accelerator, global_step,
 		stop_time = 0
 	else:
 		stop_time += 1
+		logger.info("Model not improving after %d validations", stop_time)
 
 	logger.info("***** Eval result at step {} *****".format(global_step))
 	for key in sorted(result.keys()):
@@ -193,7 +194,7 @@ def train(args, model, tokenizer, train_dataloader, valid_dataloader, accelerato
 
 	if args.train_type in ['word', 'joint']:
 		# Notice: we assign a weight of 5 for BAD words
-		word_loss_fct = nn.CrossEntropyLoss(torch.Tensor([5, 1]).cuda())
+		word_loss_fct = nn.CrossEntropyLoss() # nn.CrossEntropyLoss(torch.Tensor([100, 1]).cuda())
 
 	for epoch in range(args.max_epoch):
 		for batch in train_dataloader:
@@ -233,22 +234,15 @@ def train(args, model, tokenizer, train_dataloader, valid_dataloader, accelerato
 				if accelerator.is_main_process:
 					tokenizer.save_pretrained(steps_output_dir)
 
-			if global_step > args.max_steps:
-				train_dataloader.close()
-				valid_dataloader.close()
-				break
+			if global_step >= args.max_steps:
+				logger.info("Finishing training! Best model saved to " + os.path.join(args.output_dir, 'best_'+args.best_metric))
+				exit()
 
 			if args.stop_criterion is not None and stop_time >= args.stop_criterion:
-				train_dataloader.close()
-				valid_dataloader.close()
-				break
+				logger.info("Finishing training! Best model saved to " + os.path.join(args.output_dir, 'best_'+args.best_metric))
+				exit()
 
 def infer(args, model, tokenizer, infer_dataloader):
-
-	if args.output_dir is None:
-		args.output_dir = args.data_dir
-	
-	infer_dataloader = torch.utils.data.DataLoader(infer_dataset, shuffle=False, batch_size=args.batch_size)
 
 	model.cuda() # 推断阶段我就懒得写分布式了，请使用单卡推断吧
 
@@ -263,17 +257,15 @@ def infer(args, model, tokenizer, infer_dataloader):
 	for batch in infer_dataloader:
 
 		with torch.no_grad():
-			if has_additional_feature:
-				sent_outputs, word_outputs = model(**batch)
-			else:
-				sent_outputs, word_outputs = model(**batch)
+			batch = {k:v.to(model.device) for k,v in batch.items()}
+			sent_outputs, word_outputs = model(**batch)
 
 			word_preds = None
 			sent_preds = None
 			if args.infer_type in ['sent', 'joint']:
-				all_sent_outputs.append(sent_outputs.detach().cpu().numpy().tolist())
+				all_sent_outputs.extend(sent_outputs.detach().cpu().numpy().tolist())
 			if args.infer_type in ['word', 'joint']:
-				for i in range(len(batch[0])):
+				for i in range(len(batch['input_ids'])):
 					active_word_positions = batch['subword_mask'][i] == 1
 					active_word_outputs = word_outputs[i][active_word_positions]
 					all_word_outputs.append(torch.argmax(active_word_outputs, axis=-1).detach().cpu().tolist())
@@ -295,12 +287,12 @@ def infer(args, model, tokenizer, infer_dataloader):
 if __name__ == '__main__':
 
 	parser = argparse.ArgumentParser()
-	parser.add_argument("--model_type", default='xlm_r', type=str, choices=('bert', 'xlm-mlm', 'xlm-tlm', 'xlm_r', 'distilbert'),
-		help="Pretrained model you want to use. Choose from bert, xlm-mlm, xlm-tlm and xlm_r.")
+	parser.add_argument("--model_type", default='xlmr', type=str, choices=('bert', 'xlm-mlm', 'xlm-tlm', 'xlmr', 'distilbert', 'opus-mt', 'mbart'),
+		help="Pretrained model you want to use. Choose from bert, xlm-mlm, xlm-tlm and xlmr.")
 	parser.add_argument("--model_path", default='xlm-roberta-base', type=str, help="Path to your downloaded pretrained model.")
 	parser.add_argument("--data_dir", type=str, required=True, 
 		help="The directory where the train, dev and infer data are stored.")
-	parser.add_argument("--output_dir", type=str, required=True,
+	parser.add_argument("--output_dir", type=str, default=None,
 		help="The output directory where the model checkpoints will be written.")
 	parser.add_argument("--max_length", default=None, type=int,
 		help="The maximum total input sequence length after tokenization. Longer will be truncated.")
@@ -374,7 +366,7 @@ if __name__ == '__main__':
 	ModelDict = {'bert': BertPreTrainedModelForQE, 
 				 'xlm-mlm': XLMPreTrainedModelForQE,
 				 'xlm-tlm': XLMPreTrainedModelForQE,
-				 'xlm_r': XLMRobertaPreTrainedModelForQE,
+				 'xlmr': XLMRobertaPreTrainedModelForQE,
 				 'distilbert': DistilBertPreTrainedModelForQE,
 				 'mbart': MBartPreTrainedModelForQE,
 				 'opus-mt': MarianPreTrainedModelForQE}
@@ -382,6 +374,8 @@ if __name__ == '__main__':
 	PreTrainedModelForQE = ModelDict[args.model_type]
 
 	if args.do_train:
+
+		assert args.output_dir is not None
 
 		if (
 			os.path.exists(args.output_dir)
@@ -456,6 +450,8 @@ if __name__ == '__main__':
 			args.lang2id = config.lang2id
 			assert args.langtok_a in args.lang2id.keys()
 			assert args.langtok_b in args.lang2id.keys()
+		else:
+			args.lang2id = None
 
 		tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
 		model = PreTrainedModelForQE.from_pretrained(
@@ -464,7 +460,12 @@ if __name__ == '__main__':
 			args=args,
 			local_files_only=True,
 		)
-		infer_dataset = load_infer_examples(args, tokenizer)
+
+		if args.add_gap_to_target_text:
+			tokenizer.add_tokens('<gap>', special_tokens=True)
+			model.resize_token_embeddings(len(tokenizer))
+
+		infer_dataset = read_and_process_examples(args, tokenizer)
 
 		if args.pad_to_max_length:
 			# If padding was already done ot max length, we use the default data collator that will just convert everything
@@ -476,9 +477,9 @@ if __name__ == '__main__':
 			# of 8s, which will enable the use of Tensor Cores on NVIDIA hardware with compute capability >= 7.5 (Volta).
 			data_collator = DataCollatorForQE(tokenizer, pad_to_multiple_of=8 if accelerator.use_fp16 else None)
 
-		infer_dataloader = DataLoader(infer_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.batch_size)
+		infer_dataloader = DataLoader(infer_dataset, collate_fn=data_collator, batch_size=args.batch_size)
 
 		if args.output_dir is None:
 			args.output_dir = args.data_dir
 
-		infer(args, model, tokenizer, infer_dataset)
+		infer(args, model, tokenizer, infer_dataloader)

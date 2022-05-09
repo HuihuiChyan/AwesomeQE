@@ -3,7 +3,7 @@ import torch
 import random
 import logging
 import datasets
-from typing import Optional
+from typing import Optional, Any
 from functools import partial
 from dataclasses import dataclass
 from transformers import PreTrainedTokenizerBase
@@ -25,6 +25,26 @@ class DataCollatorForQE(DataCollatorMixin):
 
     def torch_call(self, features):
 
+        if "decoder_input_ids" in features[0].keys():
+            decoder_input_ids = [feature["decoder_input_ids"] for feature in features]
+            # We have to pad the decoder_input_ids before calling `tokenizer.pad` as this method won't pad them and needs them of the
+            # same length to return tensors.
+
+            max_decoder_input_length = max(len(l) for l in decoder_input_ids)
+            if self.pad_to_multiple_of is not None:
+                max_decoder_input_length = (
+                    (max_decoder_input_length + self.pad_to_multiple_of - 1)
+                    // self.pad_to_multiple_of
+                    * self.pad_to_multiple_of
+                )
+
+            padding_side = self.tokenizer.padding_side
+            for feature in features:
+                remainder = [self.label_pad_token_id] * (max_decoder_input_length - len(feature["decoder_input_ids"]))
+                feature["decoder_input_ids"] = (
+                    feature["decoder_input_ids"] + remainder if padding_side == "right" else remainder + feature["decoder_input_ids"]
+                )
+
         batch = self.tokenizer.pad(
             features,
             padding=self.padding,
@@ -33,7 +53,11 @@ class DataCollatorForQE(DataCollatorMixin):
             return_tensors=None,
         )
 
-        sequence_length = torch.tensor(batch["input_ids"]).shape[1]
+        if "decoder_input_ids" in features[0].keys():
+            sequence_length = len(feature["decoder_input_ids"])
+        else:
+            sequence_length = torch.tensor(batch["input_ids"]).shape[1]
+
         padding_side = self.tokenizer.padding_side
 
         if padding_side == "right":
@@ -62,6 +86,7 @@ class DataCollatorForQE(DataCollatorMixin):
                 batch[k] = torch.tensor(v, dtype=torch.long)
 
         return batch
+
 
 def get_subword_mask(word_ids, wordlab_line, token_type_ids, attention_mask, predict_side="second"):
     previous_word_idx = None
@@ -138,19 +163,21 @@ def preprocess_function_for_single_sequence(
     language_b=None,
     is_split_into_words=False,
     add_gap_to_target_text=True,
+    return_subword_mask=False,
 ):
 
     assert "lines_b" not in examples.data.keys()
 
     if "wordlab_lines" in examples.data.keys():
         assert is_split_into_words == True
+        return_subword_mask = True
         truncation = False
     else:
         truncation = True
 
     if is_split_into_words:
         examples["lines_a"] = [line.split() for line in examples["lines_a"]]
-        if add_gap_to_text: # make sure word labels already include GAP
+        if add_gap_to_target_text: # make sure word labels already include GAP
             examples["lines_a"] = [(' <gap> ' + ' <gap> '.join(line) + ' <gap> ').split() for line in examples["lines_a"]]
 
     padding = "max_length" if pad_to_max_length else False
@@ -161,7 +188,7 @@ def preprocess_function_for_single_sequence(
                           max_length=max_length,
                           return_special_tokens_mask=True,
                           is_split_into_words=is_split_into_words)
-  
+    
     if "wordlab_lines" in examples.data.keys():
         batched_wordlab_lines = []
         batched_subword_masks = []
@@ -172,7 +199,15 @@ def preprocess_function_for_single_sequence(
             batched_subword_masks.append(subword_mask)
             batched_wordlab_lines.append(wordlab_line)
         encodings["subword_mask"] = batched_subword_masks
-        encodings["wordlab_lines"] = batched_wordlab_lines
+        encodings["wordlab_lines"] = batched_wordlab_lines    
+    elif return_subword_mask:
+        batched_subword_masks = []
+        for idx in range(len(examples['lines_a'])):
+            token_type_ids = [0 for i in encodings.input_ids[idx]]
+            attention_mask = encodings.attention_mask[idx]
+            subword_mask, _ = get_subword_mask(encodings[idx].word_ids, None, token_type_ids, attention_mask, predict_side="first")
+            batched_subword_masks.append(subword_mask)
+        encodings["subword_mask"] = batched_subword_masks
 
     if has_language_embedding:
         batched_token_type_ids = []
@@ -195,10 +230,12 @@ def preprocess_function_for_paired_sequence(
     language_b=None,
     is_split_into_words=False,
     add_gap_to_target_text=True,
+    return_subword_mask=False,
 ):
 
     if "wordlab_lines" in examples.data.keys():
         assert is_split_into_words == True
+        return_subword_mask = True
         truncation = "only_first"
     else:
         truncation = True
@@ -209,9 +246,6 @@ def preprocess_function_for_paired_sequence(
         if add_gap_to_target_text: # make sure word labels already include GAP
             examples["lines_b"] = [(' <gap> ' + ' <gap> '.join(line) + ' <gap> ').split() for line in examples["lines_b"]]
 
-    # for i in range(len(examples["lines_a"])):
-    #     assert len(examples["lines_b"][i]) == len(examples["wordlab_lines"][i])
-
     padding = "max_length" if pad_to_max_length else False
 
     encodings = tokenizer(examples["lines_a"],
@@ -221,21 +255,28 @@ def preprocess_function_for_paired_sequence(
                           max_length=max_length,
                           return_special_tokens_mask=True,
                           is_split_into_words=is_split_into_words)
-  
-    if "wordlab_lines" in examples.data.keys():
-        batched_wordlab_lines = []
+
+    if return_subword_mask:
         batched_subword_masks = []
-        for idx, wordlab_line in enumerate(examples["wordlab_lines"]):
+        if "wordlab_lines" in examples.data.keys():
+             batched_wordlab_lines = []
+        for idx in range(len(encodings['input_ids'])):
             if not (has_segment_embedding or has_language_embedding):
                 token_type_ids = get_token_type_ids_for_sentpair_in_roberta(encodings['special_tokens_mask'][idx])
             else:
                 token_type_ids = encodings['token_type_ids'][idx]
             attention_mask = encodings.attention_mask[idx]
+            if "wordlab_lines" in examples.data.keys():
+                wordlab_line = examples["wordlab_lines"][idx]
+            else:
+                wordlab_line = None
             subword_mask, wordlab_line = get_subword_mask(encodings[idx].word_ids, wordlab_line, token_type_ids, attention_mask)
             batched_subword_masks.append(subword_mask)
-            batched_wordlab_lines.append(wordlab_line)
+            if "wordlab_lines" in examples.data.keys():
+                batched_wordlab_lines.append(wordlab_line)
         encodings["subword_mask"] = batched_subword_masks
-        encodings["wordlab_lines"] = batched_wordlab_lines
+        if "wordlab_lines" in examples.data.keys():
+            encodings["wordlab_lines"] = batched_wordlab_lines
 
     if has_language_embedding:
         batched_token_type_ids = []
@@ -245,6 +286,73 @@ def preprocess_function_for_paired_sequence(
         encodings["token_type_ids"] = batched_token_type_ids
 
     return encodings
+
+def preprocess_function_for_encoder_decoder(
+    examples,
+    tokenizer,
+    max_length=None,
+    pad_to_max_length=False,
+    has_language_embedding=False,
+    has_segment_embedding=False,
+    lang2id=None, 
+    language_a=None,
+    language_b=None,
+    is_split_into_words=False,
+    add_gap_to_target_text=True,
+    return_subword_mask=False,
+):
+
+    if "wordlab_lines" in examples.data.keys():
+        assert is_split_into_words == True
+        return_subword_mask = True
+        decoder_truncation = False
+    else:
+        decoder_truncation = True
+
+    if is_split_into_words:
+        # examples["lines_a"] = [line.split() for line in examples["lines_a"]]
+        examples["lines_b"] = [line.split() for line in examples["lines_b"]]
+        if add_gap_to_target_text: # make sure word labels already include GAP
+            examples["lines_b"] = [(' <gap> ' + ' <gap> '.join(line) + ' <gap> ').split() for line in examples["lines_b"]]
+
+    padding = "max_length" if pad_to_max_length else False
+
+    encodings = tokenizer(examples["lines_a"],
+                          padding=padding,
+                          truncation=True,
+                          max_length=max_length)
+
+    with tokenizer.as_target_tokenizer():
+        encodings_b = tokenizer(examples["lines_b"],
+                                padding=padding,
+                                truncation=decoder_truncation, 
+                                max_length=max_length,
+                                return_special_tokens_mask=True,
+                                is_split_into_words=is_split_into_words)
+
+    encodings["decoder_input_ids"] = encodings_b["input_ids"]
+
+    if return_subword_mask:
+        batched_subword_masks = []
+        if "wordlab_lines" in examples.data.keys():
+             batched_wordlab_lines = []
+        for idx in range(len(encodings_b['input_ids'])):
+            token_type_ids = [0 for i in encodings_b.input_ids[idx]]
+            attention_mask = encodings_b.attention_mask[idx]
+            if "wordlab_lines" in examples.data.keys():
+                wordlab_line = examples["wordlab_lines"][idx]
+            else:
+                wordlab_line = None
+            subword_mask, wordlab_line = get_subword_mask(encodings_b[idx].word_ids, wordlab_line, token_type_ids, attention_mask)
+            batched_subword_masks.append(subword_mask)
+            if "wordlab_lines" in examples.data.keys():
+                batched_wordlab_lines.append(wordlab_line)
+        encodings["subword_mask"] = batched_subword_masks
+        if "wordlab_lines" in examples.data.keys():
+            encodings["wordlab_lines"] = batched_wordlab_lines
+
+    return encodings
+
 
 def read_and_process_examples(args, tokenizer, evaluate=False):
 
@@ -258,7 +366,7 @@ def read_and_process_examples(args, tokenizer, evaluate=False):
     dataset = read_examples(args, data_prefix=data_prefix, data_type=data_type)
     dataset = datasets.Dataset.from_dict(dataset)
 
-    is_split_into_words = (data_type in ['word', 'joint'])
+    is_split_into_words = (data_type in ['word', 'joint'] if data_type is not None else args.infer_type in ['word', 'joint'])
     has_language_embedding = (args.model_type in ['xlm-tlm', 'xlm-mlm'])
     has_segment_embedding = (args.model_type == 'bert')
 
@@ -268,10 +376,13 @@ def read_and_process_examples(args, tokenizer, evaluate=False):
     if args.do_partial_prediction:
         preprocess_function = preprocess_function_for_single_sequence
         remove_columns = ["lines_a"]
+    elif args.model_type in ["opus-mt", "mbart"]:
+        preprocess_function = preprocess_function_for_encoder_decoder
+        remove_columns = ["lines_a", "lines_b"]
     else:
         preprocess_function = preprocess_function_for_paired_sequence
         remove_columns = ["lines_a", "lines_b"]
-    
+
     partial_preprocess_function = partial(preprocess_function,
                                           tokenizer=tokenizer,
                                           max_length=args.max_length,
@@ -282,12 +393,13 @@ def read_and_process_examples(args, tokenizer, evaluate=False):
                                           language_a=args.langtok_a,
                                           language_b=args.langtok_b,
                                           is_split_into_words=is_split_into_words,
-                                          add_gap_to_target_text=args.add_gap_to_target_text)
+                                          add_gap_to_target_text=args.add_gap_to_target_text,
+                                          return_subword_mask=args.infer_type in ["word", "joint"])
 
     dataset = dataset.map(partial_preprocess_function, batched=True, remove_columns=remove_columns)
                   
     # Log a few random samples from the training set:
-    for index in random.sample(range(len(dataset)), 100):
+    for index in random.sample(range(len(dataset)), 3):
         logger.info(f"Sample {index} of the {data_prefix} set: {dataset[index]}.")
 
     return dataset

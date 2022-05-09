@@ -12,6 +12,7 @@ from transformers import (
 	DistilBertPreTrainedModel,
 	MBartPreTrainedModel,
 )
+from transformers.models.bart.modeling_bart import shift_tokens_right
 from transformers.models.marian.modeling_marian import MarianPreTrainedModel
 import pdb
 
@@ -44,14 +45,27 @@ class QEBaseClass(object):
 			)
 			sequence_outputs = self.dropout(outputs[0])
 			pooled_outputs = sequence_outputs[:, 0, :]
-		elif self.model_type in ['xlm_r', 'distilbert']:
+		elif self.model_type == 'xlmr':
 			outputs = self.roberta(
 				input_ids,
 				attention_mask=attention_mask,
 			)
 			sequence_outputs = self.dropout(outputs[0])
 			pooled_outputs = sequence_outputs[:, 0, :]
+		elif self.model_type == 'distilbert':
+			outputs = self.distilbert(
+				input_ids,
+				attention_mask=attention_mask,
+			)
+			sequence_outputs = self.dropout(outputs[0])
+			pooled_outputs = sequence_outputs[:, 0, :]
 		elif self.model_type in ['mbart', 'opus-mt']:
+
+			eos_mask = decoder_input_ids.eq(self.config.eos_token_id)
+			eos_indices = eos_mask.nonzero(as_tuple=True)[1]
+
+			decoder_input_ids = shift_tokens_right(decoder_input_ids, self.config.pad_token_id, self.config.decoder_start_token_id)
+
 			outputs = self.model(
 				input_ids,
 				attention_mask=attention_mask,
@@ -59,11 +73,11 @@ class QEBaseClass(object):
 				decoder_attention_mask=decoder_attention_mask,
 			)
 			sequence_outputs = self.dropout(outputs[0])
-			eos_mask = decoder_input_ids.eq(self.config.eos_token_id)
-			eos_indices = eos_mask.nonzero(as_tuple=True)[1]
+
 			pooled_outputs = sequence_outputs[eos_mask, :].view(sequence_outputs.size(0), -1, sequence_outputs.size(-1))[
 				:, -1, :
 			]
+
 		else:
 			raise Exception('Please check your model_type!')
 
@@ -135,7 +149,7 @@ class DistilBertPreTrainedModelForQE(QEBaseClass, DistilBertPreTrainedModel):
 		super().__init__(config)
 		# config.num_labels = 1 # 在config里默认是2，但是我们这里需要设置成1
 		self.model_type = args.model_type
-		self.pretrained_model = DistilBertModel(config)
+		self.distilbert = DistilBertModel(config)
 		self.dropout = nn.Dropout(config.dropout)
 
 		if args.has_additional_feature:
