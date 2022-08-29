@@ -326,8 +326,8 @@ if __name__ == '__main__':
 	parser.add_argument("--sentlab_suffix", type=str, default="hter", help="The suffix for sentence-level labels.")
 	parser.add_argument("--wordlab_suffix", type=str, default="tags", help="The suffix for word-level labels.")
 
-	parser.add_argument("--langtok_a", type=str, default=None, help="langtok for first segment in XLM.")
-	parser.add_argument("--langtok_b", type=str, default=None, help="langtok for second segment in XLM.")
+	parser.add_argument("--langtok_a", type=str, default=None, help="langtok for first segment in XLM and mBART.")
+	parser.add_argument("--langtok_b", type=str, default=None, help="langtok for second segment in XLM and mBART.")
 	parser.add_argument("--do_partial_prediction", action="store_true", 
 		help="Whether to only use one side to do prediction. You need to store everything in segment_a if you do so.")
 	parser.add_argument("--add_gap_to_target_text", action='store_true', 
@@ -407,8 +407,12 @@ if __name__ == '__main__':
 			assert args.langtok_b in args.lang2id.keys()
 		else:
 			args.lang2id = None
-
-		tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True, src_lang="en_XX", tgt_lang="en_XX")
+		
+		if args.model_type == "mbart":
+			assert args.langtok_a is not None and args.langtok_b is not None, "Please set correct langtok if you use mbart!"
+			tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True, src_lang=args.langtok_a, tgt_lang=args.langtok_b)
+		else:
+			tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
 		model = PreTrainedModelForQE.from_pretrained(
 			args.model_path,
 			config=config,
