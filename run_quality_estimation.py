@@ -408,7 +408,7 @@ if __name__ == '__main__':
 		else:
 			args.lang2id = None
 
-		tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True)
+		tokenizer = AutoTokenizer.from_pretrained(args.model_path, local_files_only=True, src_lang="en_XX", tgt_lang="en_XX")
 		model = PreTrainedModelForQE.from_pretrained(
 			args.model_path,
 			config=config,

@@ -322,6 +322,7 @@ def preprocess_function_for_encoder_decoder(
                           truncation=True,
                           max_length=max_length)
 
+    import pdb;pdb.set_trace()
     with tokenizer.as_target_tokenizer():
         encodings_b = tokenizer(examples["lines_b"],
                                 padding=padding,
@@ -329,6 +330,7 @@ def preprocess_function_for_encoder_decoder(
                                 max_length=max_length,
                                 return_special_tokens_mask=True,
                                 is_split_into_words=is_split_into_words)
+    import pdb;pdb.set_trace()
 
     encodings["decoder_input_ids"] = encodings_b["input_ids"]
 
